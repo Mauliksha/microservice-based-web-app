@@ -270,40 +270,61 @@ This architecture provides a solid foundation for a production microservices app
 
 # Architecture Overview:
 
-Public Web: React frontend with CloudFront + S3 for global distribution
-Admin API: Containerized Node.js API on ECS Fargate for automatic scaling
-Database: Aurora Serverless v2 PostgreSQL for cost optimization and multi-AZ
-Network: VPC with public/private subnets across multiple AZs
-Security: WAF, SSL certificates, and proper IAM roles
+# Public Web:
+React frontend with CloudFront + S3 for global distribution
+# Admin API: 
+Containerized Node.js API on ECS Fargate for automatic scaling
+# Database: 
+Aurora Serverless v2 PostgreSQL for cost optimization and multi-AZ
+# Network: 
+VPC with public/private subnets across multiple AZs
+# Security: 
+WAF, SSL certificates, and proper IAM roles
 
 # AWS Services Justification:
 
-ECS Fargate: Serverless containers, no EC2 management, automatic scaling
-Aurora Serverless v2: Scales to zero when not in use, perfect for variable workloads
-CloudFront: Global edge locations for performance and cost optimization
-Application Load Balancer: Layer 7 routing, health checks, and SSL termination
-AWS Secrets Manager: Automatic rotation, encryption at rest and in transit
+# ECS Fargate: 
+Serverless containers, no EC2 management, automatic scaling
+# Aurora Serverless v2: 
+Scales to zero when not in use, perfect for variable workloads
+# CloudFront: 
+Global edge locations for performance and cost optimization
+# Application Load Balancer: 
+Layer 7 routing, health checks, and SSL termination
+# AWS Secrets Manager: 
+Automatic rotation, encryption at rest and in transit
 
 # Architecture Highlights:
 
-Frontend: React application with Vite, distributed globally via CloudFront + S3
-Backend: Node.js Express API running on ECS Fargate with auto-scaling
-Database: Aurora Serverless v2 PostgreSQL for cost optimization and multi-AZ availability
-Infrastructure: Modular Terraform configuration with environment separation
-Security: WAF, VPC isolation, security groups, and secrets management
-Monitoring: CloudWatch dashboards, alarms, and comprehensive logging
+# Frontend: 
+React application with Vite, distributed globally via CloudFront + S3
+# Backend: 
+Node.js Express API running on ECS Fargate with auto-scaling
+# Database: 
+Aurora Serverless v2 PostgreSQL for cost optimization and multi-AZ availability
+# Infrastructure: 
+Modular Terraform configuration with environment separation
+# Security: 
+WAF, VPC isolation, security groups, and secrets management
+# Monitoring: 
+CloudWatch dashboards, alarms, and comprehensive logging
 
 # Key Design Decisions & Justifications:
 
-ECS Fargate over EC2: Serverless containers eliminate infrastructure management and provide automatic scaling without capacity planning.
+# ECS Fargate over EC2: 
+Serverless containers eliminate infrastructure management and provide automatic scaling without capacity planning.
 
-Aurora Serverless v2: Scales to zero when not in use, perfect for variable workloads, and provides automatic multi-AZ failover.
+# Aurora Serverless v2: 
+Scales to zero when not in use, perfect for variable workloads, and provides automatic multi-AZ failover.
 
-CloudFront + S3: Global edge distribution reduces latency and bandwidth costs while providing high availability.
+# CloudFront + S3: 
+Global edge distribution reduces latency and bandwidth costs while providing high availability.
 
-Modular Terraform: Each component is separated into reusable modules, making the infrastructure maintainable and testable.
+# Modular Terraform: 
+Each component is separated into reusable modules, making the infrastructure maintainable and testable.
 
-GitHub Actions CI/CD: Comprehensive pipeline with testing, security scanning, infrastructure deployment, and rollback capabilities.
+# GitHub Actions CI/CD: 
+Comprehensive pipeline with testing, security scanning, infrastructure deployment, and rollback capabilities.
 
 # Cost-Aware Features:
 
