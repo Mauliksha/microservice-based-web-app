@@ -1,0 +1,270 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: microservice-app-dev-api
+  ECS_SERVICE: microservice-app-dev-api
+  ECS_CLUSTER: microservice-app-dev-cluster
+  CONTAINER_NAME: api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install API dependencies
+        working-directory: ./api
+        run: npm ci
+
+      - name: Run API tests
+        working-directory: ./api
+        run: npm test
+
+      - name: Run API linting
+        working-directory: ./api
+        run: npm run lint
+
+      - name: Setup Node.js for frontend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: ./frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy-infrastructure:
+    needs: [test, security-scan]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ./infrastructure
+        run: terraform init
+
+      - name: Terraform Format
+        working-directory: ./infrastructure
+        run: terraform fmt -check
+
+      - name: Terraform Plan
+        working-directory: ./infrastructure
+        run: |
+          ENV=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          terraform plan -var-file="environments/${ENV}.tfvars" -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./infrastructure
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+        run: terraform apply tfplan
+
+      - name: Get ECR Repository URI
+        id: ecr-uri
+        working-directory: ./infrastructure
+        run: |
+          ECR_URI=$(terraform output -raw ecr_repository_url)
+          echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
+
+    outputs:
+      ecr_uri: ${{ steps.ecr-uri.outputs.ecr_uri }}
+
+  build-and-deploy-api:
+    needs: [deploy-infrastructure]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        working-directory: ./api
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:$IMAGE_TAG $ECR_REGISTRY/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:latest
+          docker push $ECR_REGISTRY/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:latest
+
+      - name: Update ECS service
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          ENV=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="microservice-app-${ENV}-api"
+          CLUSTER_NAME="microservice-app-${ENV}-cluster"
+          
+          # Get current task definition
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${SERVICE_NAME} --query taskDefinition)
+          
+          # Update the image in task definition
+          NEW_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ needs.deploy-infrastructure.outputs.ecr_uri }}:${IMAGE_TAG}"
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "$NEW_IMAGE" '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.placementConstraints) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+          
+          # Register new task definition
+          aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEFINITION"
+          
+          # Update service
+          aws ecs update-service --cluster ${CLUSTER_NAME} --service ${SERVICE_NAME} --task-definition ${SERVICE_NAME}
+          
+          # Wait for service to become stable
+          aws ecs wait services-stable --cluster ${CLUSTER_NAME} --services ${SERVICE_NAME}
+
+  deploy-frontend:
+    needs: [deploy-infrastructure, build-and-deploy-api]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get infrastructure outputs
+        working-directory: ./infrastructure
+        run: |
+          ENV=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          terraform init
+          S3_BUCKET=$(terraform output -raw s3_bucket_name)
+          CLOUDFRONT_ID=$(terraform output -raw frontend_domain)
+          API_ENDPOINT=$(terraform output -raw api_endpoint)
+          
+          echo "S3_BUCKET=$S3_BUCKET" >> $GITHUB_ENV
+          echo "CLOUDFRONT_ID=$CLOUDFRONT_ID" >> $GITHUB_ENV
+          echo "VITE_API_URL=$API_ENDPOINT" >> $GITHUB_ENV
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./frontend
+        env:
+          VITE_API_URL: ${{ env.VITE_API_URL }}
+        run: npm run build
+
+      - name: Deploy to S3
+        working-directory: ./frontend
+        run: |
+          aws s3 sync dist/ s3://${{ env.S3_BUCKET }} --delete
+          
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation --distribution-id ${{ env.CLOUDFRONT_ID }} --paths "/*"
+
+  rollback:
+    needs: [build-and-deploy-api, deploy-frontend]
+    runs-on: ubuntu-latest
+    if: failure() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback ECS service
+        run: |
+          ENV=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          SERVICE_NAME="microservice-app-${ENV}-api"
+          CLUSTER_NAME="microservice-app-${ENV}-cluster"
+          
+          # Get previous task definition revision
+          PREVIOUS_TASK_DEF=$(aws ecs describe-services --cluster ${CLUSTER_NAME} --services ${SERVICE_NAME} --query 'services[0].deployments[1].taskDefinition' --output text)
+          
+          if [ "$PREVIOUS_TASK_DEF" != "None" ]; then
+            echo "Rolling back to: $PREVIOUS_TASK_DEF"
+            aws ecs update-service --cluster ${CLUSTER_NAME} --service ${SERVICE_NAME} --task-definition $PREVIOUS_TASK_DEF
+            aws ecs wait services-stable --cluster ${CLUSTER_NAME} --services ${SERVICE_NAME}
+          else
+            echo "No previous task definition found for rollback"
+          fi
